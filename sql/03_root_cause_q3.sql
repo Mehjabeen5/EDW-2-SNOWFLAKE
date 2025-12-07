@@ -1,0 +1,8 @@
+WITH T (QUARTER, REGION, PRODUCT, REVENUE, COST) AS (
+    SELECT * FROM VALUES
+        ('2024-Q3', 'East', 'Product A', 70000, 85000),
+        ('2024-Q3', 'West', 'Product B', 130000, 115000)
+)
+SELECT *,
+       REVENUE - COST AS PROFIT
+FROM T;
