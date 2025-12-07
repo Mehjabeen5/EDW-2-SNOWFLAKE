@@ -9,5 +9,4 @@ WITH T (QUARTER, REGION, PRODUCT, REVENUE, COST) AS (
     ('2024-Q3', 'West', 'Product B', 130000, 115000),
     ('2024-Q4', 'East', 'Product A', 160000, 100000),
     ('2024-Q4', 'West', 'Product B', 140000, 120000)
-)
-SELECT * FROM T;
+);
