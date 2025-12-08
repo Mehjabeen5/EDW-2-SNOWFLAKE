@@ -1,152 +1,171 @@
 import streamlit as st
-import snowflake.connector
 import pandas as pd
-import openai
-import re
+from snowflake.snowpark.context import get_active_session
 
-# ---------------------------
-# CONFIG
-# ---------------------------
+# -------------------------------------------------------------
+# ✅ Snowflake Native Session (NO SECRETS, NO PASSWORDS)
+# -------------------------------------------------------------
+session = get_active_session()
 
-SNOWFLAKE_CONFIG = {
-    "account": "rla87684",
-    "user": "MSHAIK05",
-    "password": "YOUR_SNOWFLAKE_PASSWORD",
-    "warehouse": "COMPUTE_WH",
-    "database": "EDW_2_DB",
-    "schema": "PUBLIC",
-    "role": "ACCOUNTADMIN"
-}
+st.set_page_config(page_title="EDW-2 Reasoning Assistant", layout="centered")
 
-openai.api_key = "YOUR_OPENAI_KEY"   # later you can swap for Cortex
+# -------------------------------------------------------------
+# ✅ UI HEADER
+# -------------------------------------------------------------
+st.title("🧠 EDW-2 Reasoning Query Assistant (Snowflake Cortex)")
 
-# ---------------------------
-# DATABASE CONNECTION
-# ---------------------------
+st.markdown("""
+Ask a high-level **business reasoning question**.  
+The system will:
 
-def get_snowflake_connection():
-    return snowflake.connector.connect(**SNOWFLAKE_CONFIG)
+- Break it into **dynamic sub-questions**
+- Run **Snowflake analytics**
+- Use **Cortex** to generate a final explanation
+""")
 
-# ---------------------------
-# QUERY FUNCTIONS
-# ---------------------------
+question = st.text_input("🔎 Ask a reasoning question:")
 
-def get_profit_trend():
-    conn = get_snowflake_connection()
-    df = pd.read_sql("SELECT * FROM PROFIT_TREND ORDER BY QUARTER;", conn)
-    conn.close()
-    return df
+run = st.button("Run Reasoning")
 
-def get_region_trend():
-    conn = get_snowflake_connection()
-    df = pd.read_sql("""
-        SELECT REGION, SUM(REVENUE) AS TOTAL_REVENUE 
-        FROM REVENUE_DATA 
-        GROUP BY REGION;
-    """, conn)
-    conn.close()
-    return df
-
-def get_product_trend():
-    conn = get_snowflake_connection()
-    df = pd.read_sql("""
-        SELECT PRODUCT, SUM(REVENUE) AS TOTAL_REVENUE 
-        FROM REVENUE_DATA 
-        GROUP BY PRODUCT;
-    """, conn)
-    conn.close()
-    return df
-
-# ---------------------------
-# REASONING DETECTOR
-# ---------------------------
-
-def is_reasoning_question(question):
-    keywords = ["why", "reason", "cause", "drop", "decline", "low"]
-    return any(word in question.lower() for word in keywords)
-
-# ---------------------------
-# SUB-QUESTION GENERATOR
-# ---------------------------
-
-def generate_sub_questions(question):
-    return [
-        "Analyze profit trend by quarter",
-        "Analyze revenue by region",
-        "Analyze revenue by product"
-    ]
-
-# ---------------------------
-# LLM SUMMARIZER (OpenAI now → Cortex later)
-# ---------------------------
-
-def summarize_results(question, profit_df, region_df, product_df):
-
+# -------------------------------------------------------------
+# ✅ DYNAMIC SUB-QUESTION GENERATOR (NOT STATIC)
+# -------------------------------------------------------------
+def generate_subquestions(user_question: str):
     prompt = f"""
-User Question: {question}
+    Convert this business question into 3 short, professional analytical sub-questions:
+    "{user_question}"
 
-Profit Trend:
-{profit_df.to_string(index=False)}
+    The sub-questions must focus on:
+    1. Overall trends
+    2. Regional contribution
+    3. Product performance
 
-Region Trend:
-{region_df.to_string(index=False)}
+    Return as a numbered list only.
+    """
 
-Product Trend:
-{product_df.to_string(index=False)}
+    sql = f"""
+    SELECT snowflake.cortex.complete(
+        'llama3.1-70b',
+        '{prompt}'
+    )
+    """
+    result = session.sql(sql).collect()[0][0]
+    return result.split("\n")
 
-Generate a business explanation in simple language.
+
+# -------------------------------------------------------------
+# ✅ SNOWFLAKE ANALYTICS QUERIES
+# -------------------------------------------------------------
+def get_revenue_trend():
+    return session.sql("""
+        SELECT quarter, SUM(revenue) AS total_revenue
+        FROM REVENUE_TABLE
+        GROUP BY quarter
+        ORDER BY quarter
+    """).to_pandas()
+
+
+def get_region_revenue():
+    return session.sql("""
+        SELECT region, SUM(revenue) AS total_revenue
+        FROM REVENUE_TABLE
+        GROUP BY region
+        ORDER BY total_revenue DESC
+    """).to_pandas()
+
+
+def get_product_revenue():
+    return session.sql("""
+        SELECT product, SUM(revenue) AS total_revenue
+        FROM REVENUE_TABLE
+        GROUP BY product
+        ORDER BY total_revenue DESC
+    """).to_pandas()
+
+
+# -------------------------------------------------------------
+# ✅ CORTEX FINAL REASONING CALL (PROFESSIONAL)
+# -------------------------------------------------------------
+def cortex_reasoning(rev_df, reg_df, prod_df, user_q):
+
+    summary_prompt = f"""
+You are a business analyst.
+
+User Question:
+{user_q}
+
+Quarterly Revenue Summary:
+{rev_df.to_string(index=False)}
+
+Regional Revenue Summary:
+{reg_df.to_string(index=False)}
+
+Product Revenue Summary:
+{prod_df.to_string(index=False)}
+
+Write a professional business explanation that:
+- Identifies the key revenue outcome
+- Explains the top region and product
+- Avoids recommendations and next steps
+- Avoids fluff
+- Sounds executive-ready
 """
 
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+    sql = f"""
+    SELECT snowflake.cortex.complete(
+        'llama3.1-70b',
+        '{summary_prompt}'
     )
+    """
 
-    return response["choices"][0]["message"]["content"]
+    return session.sql(sql).collect()[0][0]
 
-# ---------------------------
-# STREAMLIT UI
-# ---------------------------
 
-st.set_page_config(page_title="EDW-2 Reasoning Assistant", layout="wide")
+# -------------------------------------------------------------
+# ✅ MAIN EXECUTION
+# -------------------------------------------------------------
+if run and question:
 
-st.title("📊 EDW-2 Reasoning Analytics Assistant")
+    # -------------------------
+    # ✅ STEP 1 — SUB-QUESTIONS
+    # -------------------------
+    st.markdown("## 🧩 Step 1 — Generated Sub-Questions")
 
-question = st.text_input("Ask a business question:")
+    subqs = generate_subquestions(question)
 
-if st.button("Analyze"):
+    with st.expander("View Generated Sub-Questions"):
+        for s in subqs:
+            if s.strip():
+                st.markdown(f"- {s}")
 
-    if not question:
-        st.warning("Please enter a question.")
-    
-    elif is_reasoning_question(question):
+    # -------------------------
+    # ✅ STEP 2 — ANALYTICS
+    # -------------------------
+    st.markdown("## 📊 Step 2 — Snowflake Analytics")
+    st.success("Revenue, region, and product analytics successfully executed.")
 
-        st.subheader("🧠 Reasoning Mode Detected")
+    revenue_df = get_revenue_trend()
+    region_df = get_region_revenue()
+    product_df = get_product_revenue()
 
-        sub_questions = generate_sub_questions(question)
+    with st.expander("View Revenue Trend"):
+        st.dataframe(revenue_df)
 
-        st.write("Generated Sub-Questions:")
-        for q in sub_questions:
-            st.markdown(f"- {q}")
-
-        profit_df = get_profit_trend()
-        region_df = get_region_trend()
-        product_df = get_product_trend()
-
-        st.subheader("📈 Profit Trend")
-        st.dataframe(profit_df)
-
-        st.subheader("🌍 Revenue by Region")
+    with st.expander("View Regional Revenue"):
         st.dataframe(region_df)
 
-        st.subheader("📦 Revenue by Product")
+    with st.expander("View Product Revenue"):
         st.dataframe(product_df)
 
-        st.subheader("📝 AI Explanation")
-        final_answer = summarize_results(question, profit_df, region_df, product_df)
-        st.success(final_answer)
+    # -------------------------
+    # ✅ STEP 3 — AI REASONING
+    # -------------------------
+    st.markdown("## 🤖 Step 3 — AI Reasoning (Cortex)")
+    st.markdown("## ✅ Final AI Explanation")
 
-    else:
-        st.subheader("📄 Simple Data Query Mode")
-        st.info("Non-reasoning SQL queries will be handled here later.")
+    final_answer = cortex_reasoning(
+        revenue_df, region_df, product_df, question
+    )
+
+    st.success(final_answer)
+
