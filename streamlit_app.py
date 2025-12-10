@@ -1,312 +1,160 @@
-import streamlit as st
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-import json
+import requests
+import snowflake.connector
+import streamlit as st
 
-from snowflake.snowpark.context import get_active_session
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+HOST = "<Link to your account>"
+DATABASE = "CORTEX_ANALYST_DEMO"
+SCHEMA = "REVENUE_TIMESERIES"
+STAGE = "RAW_DATA"
+FILE = "revenue_timeseries.yaml"
 
-# -----------------------------------------------------------
-# Snowflake session
-# -----------------------------------------------------------
-session = get_active_session()
+# ---------------------------------------------------------
+# CONNECTION SETUP
+# ---------------------------------------------------------
+if "CONN" not in st.session_state or st.session_state.CONN is None:
+    st.session_state.CONN = snowflake.connector.connect(
+        user="<user>",
+        password="<password>",
+        account="<account>",
+        host=HOST,
+        port=443,
+        warehouse="CORTEX_ANALYST_WH",
+        role="CORTEX_USER_ROLE",
+    )
 
-st.set_page_config(page_title="EDW-2 Reasoning Assistant", layout="wide")
-st.title("EDW-2 Reasoning Assistant (Snowflake Native)")
-
-# -----------------------------------------------------------
-# Helper: call Cortex COMPLETE safely
-# -----------------------------------------------------------
-
-def cortex_complete(prompt: str, model: str = "snowflake-arctic") -> str:
-    """
-    Call SNOWFLAKE.CORTEX.COMPLETE with the given prompt.
-
-    We manually escape single quotes so the prompt is safe as a SQL literal.
-    """
-    # Escape single quotes for SQL: ' → ''
-    safe_prompt = prompt.replace("'", "''")
-
-    query = f"""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            '{model}',
-            '{safe_prompt}'
-        )
-    """
-
-    return session.sql(query).collect()[0][0]
-
-# -----------------------------------------------------------
-# Helper: fetch analytics views
-# -----------------------------------------------------------
-
-def fetch_views():
-    """
-    Pull analytics from EDW_2_DB.REASONING.
-
-    Assumes:
-      - EDW_2_DB.REASONING.REVENUE_TABLE exists
-      - V_REVENUE_BY_QUARTER / REGION / PRODUCT exist in that schema
-    """
-    rev = session.sql("""
-        SELECT *
-        FROM EDW_2_DB.REASONING.V_REVENUE_BY_QUARTER
-        ORDER BY QUARTER
-    """).to_pandas()
-
-    reg = session.sql("""
-        SELECT *
-        FROM EDW_2_DB.REASONING.V_REVENUE_BY_REGION
-        ORDER BY QUARTER, REGION
-    """).to_pandas()
-
-    prod = session.sql("""
-        SELECT *
-        FROM EDW_2_DB.REASONING.V_REVENUE_BY_PRODUCT
-        ORDER BY QUARTER, PRODUCT
-    """).to_pandas()
-
-    return rev, reg, prod
-
-
-# -----------------------------------------------------------
-# Helper: route question → simple vs reasoning
-# -----------------------------------------------------------
-
-def classify_question(q: str) -> str:
-    """
-    Very simple heuristic router.
-
-    - "reasoning"  => why / explanation / cause
-    - "simple"     => everything else
-    """
-    lower = (q or "").lower()
-    reasoning_keywords = ["why", "cause", "reason", "driver", "explain", "because"]
-
-    if any(k in lower for k in reasoning_keywords):
-        return "reasoning"
-
-    # default: treat as a simple fact / metric question
-    return "simple"
-
-
-# -----------------------------------------------------------
-# Planning: build a small multi-step plan for reasoning mode
-# -----------------------------------------------------------
-
-def plan_steps(question: str) -> dict:
-    """
-    Build a (deterministic) multi-step plan for reasoning questions.
-
-    You can later swap this to a Cortex-generated JSON plan if you like.
-    """
-    steps = [
-        {
-            "id": "s1",
-            "type": "quarter",
-            "description": "Compare total revenue between the last two quarters."
-        },
-        {
-            "id": "s2",
-            "type": "region",
-            "description": "Identify which region had the largest negative change in revenue."
-        },
-        {
-            "id": "s3",
-            "type": "product",
-            "description": "Identify which product had the weakest performance in the last quarter."
-        },
-        {
-            "id": "s4",
-            "type": "synthesis",
-            "description": "Combine quarter, region, and product insights to explain the revenue change."
-        }
-    ]
-
-    return {
-        "question": question,
-        "steps": steps
+# ---------------------------------------------------------
+# SEND MESSAGE TO CORTEX ANALYST REST API
+# ---------------------------------------------------------
+def send_message(prompt: str) -> Dict[str, Any]:
+    """Calls the REST API and returns the response."""
+    request_body = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        "semantic_model_file": f"@{DATABASE}.{SCHEMA}.{STAGE}/{FILE}",
     }
 
+    resp = requests.post(
+        url=f"https://{HOST}/api/v2/cortex/analyst/message",
+        json=request_body,
+        headers={
+            "Authorization": f"Snowflake Token={st.session_state.CONN.rest.token}",
+            "Content-Type": "application/json",
+        },
+    )
 
-# -----------------------------------------------------------
-# Evidence builder: summarize analytics into JSON
-# -----------------------------------------------------------
+    request_id = resp.headers.get("X-Snowflake-Request-Id")
 
-def execute_plan(plan: dict, rev: pd.DataFrame, reg: pd.DataFrame, prod: pd.DataFrame) -> dict:
-    """
-    For now, just package the three analytics views into a JSON-friendly
-    evidence structure. The plan is kept for context.
-    """
-    evidence = {
-        "by_quarter": rev.to_dict(orient="records"),
-        "by_region": reg.to_dict(orient="records"),
-        "by_product": prod.to_dict(orient="records"),
-    }
-    return evidence
-
-
-# -----------------------------------------------------------
-# Simple path: no planning, just analytics + one Cortex call
-# -----------------------------------------------------------
-
-def simple_answer(question: str, rev: pd.DataFrame, reg: pd.DataFrame, prod: pd.DataFrame) -> str:
-    """
-    Simple path:
-
-    - Use analytics views
-    - Build an evidence blob
-    - Ask Cortex for a short, direct answer
-    """
-    dummy_plan = {"steps": []}
-    evidence = execute_plan(dummy_plan, rev, reg, prod)
-    evidence_json = json.dumps(evidence, default=str)
-
-    prompt = f"""
-You are a business data assistant answering straightforward questions.
-
-User question:
-{question}
-
-You are given precomputed analytics as JSON:
-{evidence_json}
-
-Instructions:
-- If the user asks for a specific value (e.g., revenue for a quarter or product),
-  answer with that number and one short explanatory sentence.
-- Do NOT describe your internal reasoning steps.
-- Do NOT list a multi-step plan.
-- Base your answer only on the data provided.
-"""
-    return cortex_complete(prompt)
-
-
-# -----------------------------------------------------------
-# Reasoning path: plan → execute → synthesize
-# -----------------------------------------------------------
-
-def synthesize_answer(question: str, plan: dict, evidence: dict) -> str:
-    """
-    Full reasoning path: include the plan and evidence in the prompt
-    and ask Cortex for a multi-sentence explanation.
-    """
-    plan_json = json.dumps(plan, default=str)
-    evidence_json = json.dumps(evidence, default=str)
-
-    prompt = f"""
-You are a senior business analyst.
-
-User question:
-{question}
-
-Planned steps (JSON):
-{plan_json}
-
-Summarized evidence from analytics (JSON):
-{evidence_json}
-
-Write a professional, concise explanation that:
-- Describes what happened (trends by quarter / region / product).
-- Highlights the main drivers of the revenue change.
-- Uses only the information in the evidence; do not hallucinate extra data.
-- Avoids bullet points; answer in 1–3 paragraphs of plain text.
-"""
-    return cortex_complete(prompt)
-
-
-# -----------------------------------------------------------
-# Streamlit UI
-# -----------------------------------------------------------
-
-question = st.text_input("Ask a business question (e.g., 'Why was revenue down last quarter?')")
-run = st.button("Run Analysis")
-
-if run and question:
-    # 1) Routing
-    route = classify_question(question)
-    st.subheader("Step 1 — Routing")
-    st.markdown(f"**Route:** `{route}`")
-
-    # ---------------------------------------
-    # SIMPLE PATH: no planning
-    # ---------------------------------------
-    if route == "simple":
-        st.markdown("_Simple question detected: skipping explicit planning and using direct analytics._")
-
-        # 2) Analytics
-        st.subheader("Step 2 — Snowflake Analytics")
-        rev, reg, prod = fetch_views()
-        st.success("Analytics successfully generated from Snowflake.")
-
-        with st.expander("Preview: Revenue by Quarter"):
-            st.dataframe(rev)
-        with st.expander("Preview: Revenue by Region"):
-            st.dataframe(reg)
-        with st.expander("Preview: Revenue by Product"):
-            st.dataframe(prod)
-
-        # 3) Direct answer
-        st.subheader("Step 3 — Direct AI Answer (no planning)")
-        final_answer = simple_answer(question, rev, reg, prod)
-
-        st.subheader("Final AI Explanation")
-        st.markdown(
-            f"""
-<div style="background-color:#ecf7ee;padding:20px;border-radius:8px;font-size:16px;line-height:1.6;">
-{final_answer}
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    # ---------------------------------------
-    # REASONING PATH: multi-step plan
-    # ---------------------------------------
+    if resp.status_code < 400:
+        return {**resp.json(), "request_id": request_id}
     else:
-        st.markdown("_Reasoning question detected: using planning + multi-step reasoning._")
-
-        # 2) Planning
-        st.subheader("Step 2 — Planning")
-        plan = plan_steps(question)
-        steps = plan.get("steps", [])
-
-        if steps:
-            st.markdown("**Planned Steps:**")
-            for s in steps:
-                st.markdown(
-                    f"- `{s.get('id', '')}` "
-                    f"[{s.get('type', '')}] – {s.get('description', '')}"
-                )
-        else:
-            st.markdown("_No steps returned; using default analytics plan._")
-
-        # 3) Analytics
-        st.subheader("Step 3 — Snowflake Analytics")
-        rev, reg, prod = fetch_views()
-        st.success("Analytics successfully generated from Snowflake.")
-
-        with st.expander("Preview: Revenue by Quarter"):
-            st.dataframe(rev)
-        with st.expander("Preview: Revenue by Region"):
-            st.dataframe(reg)
-        with st.expander("Preview: Revenue by Product"):
-            st.dataframe(prod)
-
-        # Execute plan → build evidence
-        evidence = execute_plan(plan, rev, reg, prod)
-
-        # 4) Reasoning / synthesis
-        st.subheader("Step 4 — AI Reasoning (Cortex)")
-        final_answer = synthesize_answer(question, plan, evidence)
-
-        st.subheader("Final AI Explanation")
-        st.markdown(
-            f"""
-<div style="background-color:#ecf7ee;padding:20px;border-radius:8px;font-size:16px;line-height:1.6;">
-{final_answer}
-</div>
-""",
-            unsafe_allow_html=True,
+        raise Exception(
+            f"Failed request (id: {request_id}) with status {resp.status_code}: {resp.text}"
         )
 
-        # Optional debugging info
-        with st.expander("Debug: Plan & Evidence JSON"):
-            st.json({"plan": plan, "evidence": evidence})
+# ---------------------------------------------------------
+# PROCESS MESSAGE (HANDLE CHAT INPUT)
+# ---------------------------------------------------------
+def process_message(prompt: str) -> None:
+    """Processes a message and adds the response to the chat."""
+    st.session_state.messages.append(
+        {"role": "user", "content": [{"type": "text", "text": prompt}]}
+    )
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Generating response..."):
+            response = send_message(prompt=prompt)
+            request_id = response["request_id"]
+            content = response["message"]["content"]
+            display_content(content=content, request_id=request_id)
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": content, "request_id": request_id}
+        )
+
+# ---------------------------------------------------------
+# DISPLAY CONTENT FROM ANALYST RESPONSE
+# ---------------------------------------------------------
+def display_content(
+    content: List[Dict[str, str]],
+    request_id: Optional[str] = None,
+    message_index: Optional[int] = None,
+) -> None:
+    """Displays a content item for a message."""
+    message_index = message_index or len(st.session_state.messages)
+
+    if request_id:
+        with st.expander("Request ID", expanded=False):
+            st.markdown(request_id)
+
+    for item in content:
+        if item["type"] == "text":
+            st.markdown(item["text"])
+
+        elif item["type"] == "suggestions":
+            with st.expander("Suggestions", expanded=True):
+                for suggestion_index, suggestion in enumerate(item["suggestions"]):
+                    if st.button(
+                        suggestion,
+                        key=f"{message_index}_{suggestion_index}",
+                    ):
+                        st.session_state.active_suggestion = suggestion
+
+        elif item["type"] == "sql":
+            with st.expander("SQL Query", expanded=False):
+                st.code(item["statement"], language="sql")
+
+            with st.expander("Results", expanded=True):
+                with st.spinner("Running SQL..."):
+                    df = pd.read_sql(item["statement"], st.session_state.CONN)
+
+                    if len(df.index) > 1:
+                        data_tab, line_tab, bar_tab = st.tabs(
+                            ["Data", "Line Chart", "Bar Chart"]
+                        )
+                        data_tab.dataframe(df)
+
+                        if len(df.columns) > 1:
+                            df = df.set_index(df.columns[0])
+                            with line_tab:
+                                st.line_chart(df)
+                            with bar_tab:
+                                st.bar_chart(df)
+                    else:
+                        st.dataframe(df)
+
+# ---------------------------------------------------------
+# STREAMLIT UI SETUP
+# ---------------------------------------------------------
+st.title("Cortex Analyst")
+st.markdown(f"Semantic Model: `{FILE}`")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    st.session_state.suggestions = []
+    st.session_state.active_suggestion = None
+
+# Show chat history
+for message_index, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        display_content(
+            content=message["content"],
+            request_id=message.get("request_id"),
+            message_index=message_index,
+        )
+
+# User input box
+if user_input := st.chat_input("What is your question?"):
+    process_message(prompt=user_input)
+
+# Execute suggestion automatically
+if st.session_state.active_suggestion:
+    process_message(prompt=st.session_state.active_suggestion)
+    st.session_state.active_suggestion = None
