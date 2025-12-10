@@ -1,24 +1,21 @@
+-- 02_mock_data.sql
+-- Load mock revenue data into REVENUE_TABLE
+
 USE DATABASE EDW_2_DB;
 USE SCHEMA REASONING;
 
-CREATE OR REPLACE TABLE REVENUE_TABLE (
-    QUARTER STRING,
-    REGION STRING,
-    PRODUCT STRING,
-    REVENUE NUMBER,
-    COST NUMBER,
-    ORDERS NUMBER
-);
+-- Start clean each time
+TRUNCATE TABLE REVENUE_TABLE;
 
-INSERT INTO REVENUE_TABLE VALUES
-('2024-Q1','North America','Electronics',500000,420000,1200),
-('2024-Q1','Europe','Electronics',420000,350000,1050),
-('2024-Q1','Asia','Furniture',300000,240000,820),
+INSERT INTO REVENUE_TABLE (QUARTER, REGION, PRODUCT, REVENUE, COST) VALUES
+    -- Q2
+    ('2024-Q2', 'West', 'Product A', 180000, 120000),
+    ('2024-Q2', 'East', 'Product B', 140000, 100000),
 
-('2024-Q2','North America','Electronics',380000,350000,980),
-('2024-Q2','Europe','Electronics',310000,280000,890),
-('2024-Q2','Asia','Furniture',290000,260000,800),
+    -- Q3
+    ('2024-Q3', 'West', 'Product B', 490000, 300000),
+    ('2024-Q3', 'East', 'Product A', 310000, 210000),
 
-('2024-Q3','North America','Electronics',550000,430000,1350),
-('2024-Q3','Europe','Electronics',470000,390000,1170),
-('2024-Q3','Asia','Furniture',360000,290000,910);
+    -- Q4
+    ('2024-Q4', 'West', 'Product A', 300000, 190000),
+    ('2024-Q4', 'East', 'Product B', 200000, 140000);
