@@ -1,9 +1,0 @@
-dimensions:
-  - QUARTER
-  - REGION
-  - PRODUCT
-
-metrics:
-  - TOTAL_REVENUE: "SUM(REVENUE)"
-  - TOTAL_COST: "SUM(COST)"
-  - TOTAL_PROFIT: "SUM(REVENUE - COST)"
