@@ -1,0 +1,24 @@
+USE DATABASE EDW_2_DB;
+USE SCHEMA REASONING;
+
+CREATE OR REPLACE TABLE REVENUE_TABLE (
+    QUARTER STRING,
+    REGION STRING,
+    PRODUCT STRING,
+    REVENUE NUMBER,
+    COST NUMBER,
+    ORDERS NUMBER
+);
+
+INSERT INTO REVENUE_TABLE VALUES
+('2024-Q1','North America','Electronics',500000,420000,1200),
+('2024-Q1','Europe','Electronics',420000,350000,1050),
+('2024-Q1','Asia','Furniture',300000,240000,820),
+
+('2024-Q2','North America','Electronics',380000,350000,980),
+('2024-Q2','Europe','Electronics',310000,280000,890),
+('2024-Q2','Asia','Furniture',290000,260000,800),
+
+('2024-Q3','North America','Electronics',550000,430000,1350),
+('2024-Q3','Europe','Electronics',470000,390000,1170),
+('2024-Q3','Asia','Furniture',360000,290000,910);
