@@ -1,18 +1,73 @@
--- 01_setup.sql
--- Create database / schema and the base revenue table
+/*--
+• Database, schema, warehouse, and stage creation
+--*/
 
--- Make sure we are in the right database & schema
-CREATE DATABASE IF NOT EXISTS EDW_2_DB;
-CREATE SCHEMA IF NOT EXISTS EDW_2_DB.REASONING;
+USE ROLE SECURITYADMIN;
 
-USE DATABASE EDW_2_DB;
-USE SCHEMA REASONING;
+CREATE ROLE cortex_user_role;
+GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE cortex_user_role;
 
--- Base fact table for revenue data
-CREATE OR REPLACE TABLE REVENUE_TABLE (
-    QUARTER STRING,
-    REGION  STRING,
-    PRODUCT STRING,
-    REVENUE NUMBER,
-    COST    NUMBER
+
+GRANT ROLE cortex_user_role TO USER MSHAIK05;
+
+USE ROLE sysadmin;
+
+-- Create demo database
+CREATE OR REPLACE DATABASE cortex_analyst_demo;
+
+-- Create schema
+CREATE OR REPLACE SCHEMA cortex_analyst_demo.revenue_timeseries;
+
+-- Create warehouse
+CREATE OR REPLACE WAREHOUSE cortex_analyst_wh
+    WAREHOUSE_SIZE = 'large'
+    WAREHOUSE_TYPE = 'standard'
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE
+COMMENT = 'Warehouse for Cortex Analyst demo';
+
+GRANT USAGE ON WAREHOUSE cortex_analyst_wh TO ROLE cortex_user_role;
+GRANT OPERATE ON WAREHOUSE cortex_analyst_wh TO ROLE cortex_user_role;
+
+GRANT OWNERSHIP ON SCHEMA cortex_analyst_demo.revenue_timeseries TO ROLE cortex_user_role;
+GRANT OWNERSHIP ON DATABASE cortex_analyst_demo TO ROLE cortex_user_role;
+
+
+USE ROLE cortex_user_role;
+
+-- Use the created warehouse
+USE WAREHOUSE cortex_analyst_wh;
+
+USE DATABASE cortex_analyst_demo;
+USE SCHEMA cortex_analyst_demo.revenue_timeseries;
+
+-- Create stage for raw data
+CREATE OR REPLACE STAGE raw_data DIRECTORY = (ENABLE = TRUE);
+
+/*--
+• Fact and Dimension Table Creation
+--*/
+
+-- Fact table: daily_revenue
+CREATE OR REPLACE TABLE cortex_analyst_demo.revenue_timeseries.daily_revenue (
+    date DATE,
+    revenue FLOAT,
+    cogs FLOAT,
+    forecasted_revenue FLOAT,
+    product_id INT,
+    region_id INT
+);
+
+-- Dimension table: product_dim
+CREATE OR REPLACE TABLE cortex_analyst_demo.revenue_timeseries.product_dim (
+    product_id INT,
+    product_line VARCHAR(16777216)
+);
+
+-- Dimension table: region_dim
+CREATE OR REPLACE TABLE cortex_analyst_demo.revenue_timeseries.region_dim (
+    region_id INT,
+    sales_region VARCHAR(16777216),
+    state VARCHAR(16777216)
 );
