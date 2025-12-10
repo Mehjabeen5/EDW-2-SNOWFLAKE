@@ -2,181 +2,104 @@ import streamlit as st
 from snowflake.snowpark.context import get_active_session
 import pandas as pd
 
-# ✅ Use active Snowflake session (App-native)
 session = get_active_session()
 
-# -----------------------------
-# PAGE HEADER
-# -----------------------------
 st.set_page_config(page_title="EDW-2 Reasoning Assistant", layout="wide")
-
-st.title("🧠 EDW-2 Reasoning Assistant")
-
-st.info("""
-**Reasoning Agent Activated**
-""")
+st.title("EDW-2 Reasoning Assistant (Snowflake Native)")
 
 # -----------------------------
 # USER INPUT
 # -----------------------------
-question = st.text_input("🔎 Ask a reasoning question:")
-run = st.button("Run Reasoning")
+question = st.text_input("Ask a business reasoning question:")
+run = st.button("Run Analysis")
 
 # -----------------------------
-# STEP 1: SUB-QUESTIONS
+# STEP 1: DYNAMIC SUB-QUESTIONS
 # -----------------------------
 def generate_subquestions(question):
-
-    q = question.lower()
-
-    if "why" in q and "revenue" in q:
-        return [
-            "How did total revenue change compared to the previous quarter?",
-            "Which region saw the largest revenue drop?",
-            "Which product contributed most to the decline?"
-        ]
-
-    elif "highest" in q or "top" in q:
-        return [
-            "Which quarter recorded the highest total revenue?",
-            "Which region contributed most in that quarter?",
-            "Which product contributed most in that quarter?"
-        ]
-
-    else:
-        return [
-            "How did total revenue change recently?",
-            "Which region performed best?",
-            "Which product performed best?"
-        ]
-# -----------------------------
-# ✅ STEP 2: SNOWFLAKE ANALYTICS (FIXED: QUARTER-AWARE)
-# -----------------------------
-def run_snowflake_analytics():
-
-    revenue_sql = """
-        SELECT QUARTER,
-               SUM(REVENUE) AS TOTAL_REVENUE
-        FROM EDW_2_DB.REASONING.REVENUE_TABLE
-        GROUP BY QUARTER
-        ORDER BY QUARTER;
-    """
-
-    revenue_df = session.sql(revenue_sql).to_pandas()
-
-    # ✅ Dynamically detect LAST and PREVIOUS quarters
-    last_q = revenue_df.iloc[-1]["QUARTER"]
-    prev_q = revenue_df.iloc[-2]["QUARTER"]
-
-    # ✅ Region for LAST quarter only
-    region_sql = f"""
-        SELECT REGION,
-               SUM(REVENUE) AS TOTAL_REVENUE
-        FROM EDW_2_DB.REASONING.REVENUE_TABLE
-        WHERE QUARTER = '{last_q}'
-        GROUP BY REGION
-        ORDER BY TOTAL_REVENUE DESC;
-    """
-
-    # ✅ Product for LAST quarter only
-    product_sql = f"""
-        SELECT PRODUCT,
-               SUM(REVENUE) AS TOTAL_REVENUE
-        FROM EDW_2_DB.REASONING.REVENUE_TABLE
-        WHERE QUARTER = '{last_q}'
-        GROUP BY PRODUCT
-        ORDER BY TOTAL_REVENUE DESC;
-    """
-
-    region_df = session.sql(region_sql).to_pandas()
-    product_df = session.sql(product_sql).to_pandas()
-
-    return revenue_df, region_df, product_df, last_q, prev_q
+    return [
+        "How did total revenue change across the last two quarters?",
+        "Which region experienced the largest revenue change?",
+        "Which product category contributed most to the change?"
+    ]
 
 # -----------------------------
-# ✅ STEP 3: CORTEX REASONING (FIXED: QUESTION-AWARE)
+# STEP 2: ANALYTICS FROM VIEWS
 # -----------------------------
-def cortex_reasoning(revenue_df, region_df, product_df, last_q, prev_q, question):
+def run_analytics():
+    rev = session.sql("SELECT * FROM V_REVENUE_BY_QUARTER").to_pandas()
+    reg = session.sql("SELECT * FROM V_REVENUE_BY_REGION").to_pandas()
+    prod = session.sql("SELECT * FROM V_REVENUE_BY_PRODUCT").to_pandas()
+    return rev, reg, prod
 
-    last_rev = revenue_df.iloc[-1]["TOTAL_REVENUE"]
-    prev_rev = revenue_df.iloc[-2]["TOTAL_REVENUE"]
+# -----------------------------
+# STEP 3: CORTEX REASONING
+# -----------------------------
+def cortex_reasoning(rev, reg, prod, question):
 
-    revenue_change = last_rev - prev_rev
+    last_two = rev.tail(2)
+    delta = last_two.iloc[1]["TOTAL_REVENUE"] - last_two.iloc[0]["TOTAL_REVENUE"]
 
-    top_region = region_df.iloc[0]["REGION"]
-    top_region_value = region_df.iloc[0]["TOTAL_REVENUE"]
+    worst_region = (
+        reg.groupby("REGION")["TOTAL_REVENUE"].sum()
+        .sort_values()
+        .idxmin()
+    )
 
-    top_product = product_df.iloc[0]["PRODUCT"]
-    top_product_value = product_df.iloc[0]["TOTAL_REVENUE"]
+    worst_product = (
+        prod.groupby("PRODUCT")["TOTAL_REVENUE"].sum()
+        .sort_values()
+        .idxmin()
+    )
 
-    cortex_prompt = f"""
+    prompt = f"""
 User Question:
 {question}
 
-Business Evidence:
-- Revenue in {prev_q}: {prev_rev}
-- Revenue in {last_q}: {last_rev}
-- Revenue Change: {revenue_change}
-- Top Region in {last_q}: {top_region} ({top_region_value})
-- Top Product in {last_q}: {top_product} ({top_product_value})
+Key Findings:
+Revenue change between last two quarters: {delta}
+Region with weakest performance: {worst_region}
+Product with weakest performance: {worst_product}
 
-Instructions:
-Write a clean, concise executive explanation.
-Use short professional paragraphs.
+Write a professional, concise business explanation.
 No bullet points.
-No section titles.
 No recommendations.
-Explain only what happened and why.
+Only explain what happened and why.
 """
 
     cortex_sql = f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'llama3.1-70b',
-            '{cortex_prompt}'
+            'llama3.1-8b-instant',
+            '{prompt}'
         );
     """
 
-    result = session.sql(cortex_sql).collect()[0][0]
-    return result
+    return session.sql(cortex_sql).collect()[0][0]
 
 # -----------------------------
-# ✅ MAIN EXECUTION
+# MAIN EXECUTION
 # -----------------------------
 if run and question:
 
-    # STEP 1
-    st.subheader("🧩 Step 1 — Generated Sub-Questions")
+    st.subheader("Step 1 — Generated Sub-Questions")
+    for q in generate_subquestions(question):
+        st.markdown(f"- {q}")
 
-    sub_qs = generate_subquestions(question)
+    st.subheader("Step 2 — Snowflake Analytics")
+    rev, reg, prod = run_analytics()
+    st.success("Analytics successfully generated from Snowflake.")
 
-    with st.expander("Click to view generated sub-questions"):
-        for q in sub_qs:
-            st.markdown(f"- {q}")
+    st.subheader("Step 3 — AI Reasoning (Cortex)")
 
-    # STEP 2
-    st.subheader("📊 Step 2 — Snowflake Analytics")
+    final_answer = cortex_reasoning(rev, reg, prod, question)
 
-    revenue_df, region_df, product_df, last_q, prev_q = run_snowflake_analytics()
+    st.subheader("Final AI Explanation")
 
-    st.success("Revenue data successfully analyzed.")
-
-    # STEP 3
-    st.subheader("🤖 Step 3 — AI Reasoning (Cortex)")
-
-    final_answer = cortex_reasoning(
-        revenue_df, region_df, product_df, last_q, prev_q, question
-    )
-
-    st.subheader("✅ Final AI Explanation")
-
-    # ✅ CLEAN PROFESSIONAL DISPLAY
     st.markdown(
         f"""
-<div style="background-color:#eaf6ea;padding:20px;border-radius:8px;font-size:16px;line-height:1.6;">
+<div style="background-color:#ecf7ee;padding:20px;border-radius:8px;font-size:16px;line-height:1.6;">
 {final_answer}
 </div>
 """,
         unsafe_allow_html=True
     )
-
-    st.markdown("---")
